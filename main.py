@@ -110,6 +110,9 @@ if __name__ == '__main__':
     header_token = sys.argv[1] + " " + sys.argv[2]
     logging.debug("Header token: ", header_token)
     token = extract_token_from_header(header_token)
+    if token is None:
+        logging.error("Token is invalid")
+        exit(1)
     logging.debug("Token: ", token)
     decoded_jwt = DecodedJwt(add_padding(token))
     decoded = decoded_jwt.decode()

@@ -1,46 +1,22 @@
-import os
-import logging
-import logging.handlers
-import sys
 import jwt
 import requests
+import os
+import logging
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-logging.basicConfig(
-    filename="./app.log",
-    encoding="utf-8",
-    format="{levelname}:{asctime}:{message}",
-    level=logging.DEBUG,
-    style="{",
-    datefmt="%Y-%m-%d %H:%M"
-)
+logger = logging.getLogger()
+logger.setLevel("DEBUG")
 
 TENANT_ID = os.environ.get("TENANT_ID")
 if TENANT_ID is None:
-    logging.error("TENANT_ID environment variable is not set")
     exit(1)
-else:
-    # check if TENANT_ID contains double quotes
-    if TENANT_ID[0] == '"' or TENANT_ID[-1] == '"':
-        TENANT_ID = eval(TENANT_ID)
 
-CLIENT_IDS = os.environ.get("CLIENT_IDS")
+CLIENT_IDS = os.environ.get("CLIENT_IDS").split(",")
 if CLIENT_IDS is None:
-    logging.error("CLIENT_IDS environment variable is not set")
     exit(1)
-else:
-    CLIENT_IDS = CLIENT_IDS.split(",")
-    # check if CLIENT_IDS contains double quotes
-    for i in range(len(CLIENT_IDS)):
-        if CLIENT_IDS[i][0] == '"' or CLIENT_IDS[i][-1] == '"':
-            CLIENT_IDS[i] = eval(CLIENT_IDS[i])
 
 
 class JwtData:
-    def __init__(self, iss, client_id, x5t, kid, ):
+    def __init__(self, iss, client_id, x5t, kid):
         self.iss = iss
         self.client_id = client_id
         self.x5t = x5t
@@ -57,7 +33,7 @@ class DecodedJwt:
             headers = jwt.get_unverified_header(self.token)
             return JwtData(iss=result["iss"], client_id=result["appid"], x5t=headers["x5t"], kid=headers["kid"])
         except Exception as e:
-            logging.error("An error occurred: ", e)
+            logger.error("An error occurred during decode JWT: %s", e)
             return None
 
 
@@ -78,16 +54,13 @@ def check_signature(decoded_jwt_data):
     open_id_url = "https://login.microsoftonline.com/" + TENANT_ID + "/.well-known/openid-configuration?appid=" + decoded_jwt_data.client_id
     try:
         open_id_configuration = requests.get(open_id_url)
-        logging.debug(open_id_configuration.json())
         jwks_uri = open_id_configuration.json()["jwks_uri"]
-        logging.debug("JWKS URI: ", jwks_uri)
         keys = requests.get(jwks_uri).json()["keys"]
-        logging.debug("Keys: ", keys)
         for key in keys:
             if key["kid"] == decoded_jwt_data.kid and key["x5t"] == decoded_jwt_data.x5t:
                 return True
     except Exception as e:
-        print("An error occurred: ", e)
+        logger.error("An error occurred during check signature: %s", e)
     return False
 
 
@@ -110,30 +83,54 @@ def add_padding(encoded_str):
     return encoded_str + '=' * (-len(encoded_str) % 4)
 
 
-if __name__ == '__main__':
-    header_token = sys.argv[1] + " " + sys.argv[2]
-    logging.debug("Header token: ", header_token)
+def generate_response(is_allowed):
+    auth = 'Deny'
+    if is_allowed:
+        auth = 'Allow'
+
+    return {
+        "principalId": "user",
+        "policyDocument": {
+            "Version": "2012-10-17",
+            "Statement":
+                [
+                    {
+                        "Action": "execute-api:Invoke",
+                        "Resource": [
+                            "arn:aws:execute-api:{REGION}:{API}/{STAGE}/{METHOD}/{RESOURCE}"
+                        ],
+                        "Effect": auth
+                    }
+                ]
+        }
+    }
+
+
+def lambda_handler(event, context):
+    is_allowed = False
+    header_token = event['authorizationToken']
+    logger.debug("Header Token: " + header_token)
+    if header_token is None:
+        return generate_response(is_allowed)
+
+    logger.debug("TENANT_ID: " + TENANT_ID)
+    logger.debug("CLIENT_IDS: " + str(CLIENT_IDS))
     token = extract_token_from_header(header_token)
-    if token is not None:
-        logging.error("Token is invalid")
-        exit(1)
+    logger.debug("Token: " + token)
     if token is None:
-        logging.error("Token is invalid")
-        exit(1)
-    logging.debug("Token: ", token)
+        return generate_response(is_allowed)
     decoded_jwt = DecodedJwt(add_padding(token))
     decoded = decoded_jwt.decode()
-    logging.debug("ISS: ", decoded.iss)
-    logging.debug("Client ID: ", decoded.client_id)
-    logging.debug("X5T: ", decoded.x5t)
-    logging.debug("KID: ", decoded.kid)
+    if decoded is None:
+        return generate_response(is_allowed)
     is_valid_issuer = check_issuer(decoded)
+    logger.debug("Is valid issuer: " + str(is_valid_issuer))
     is_valid_client_id = check_client_id(decoded)
+    logger.debug("Is valid client id: " + str(is_valid_client_id))
     is_valid_signature = check_signature(decoded)
-    logging.debug("Is valid issuer: ", is_valid_issuer)
-    logging.debug("Is valid client id: ", is_valid_client_id)
-    logging.debug("Is valid signature: ", is_valid_signature)
+    logger.debug("Is valid signature: " + str(is_valid_signature))
+
     if is_valid_issuer and is_valid_client_id and is_valid_signature:
-        logging.info("JWT is valid")
-    else:
-        logging.info("JWT is invalid")
+        is_allowed = True
+
+    return generate_response(is_allowed)

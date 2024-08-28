@@ -2,6 +2,8 @@ import os
 import logging
 import logging.handlers
 import sys
+import time
+
 import jwt
 import requests
 
@@ -40,11 +42,12 @@ else:
 
 
 class JwtData:
-    def __init__(self, iss, client_id, x5t, kid, ):
+    def __init__(self, iss, client_id, x5t, kid, exp):
         self.iss = iss
         self.client_id = client_id
         self.x5t = x5t
         self.kid = kid
+        self.exp = exp
 
 
 class DecodedJwt:
@@ -55,7 +58,8 @@ class DecodedJwt:
         try:
             result = jwt.decode(self.token, options={"verify_signature": False})
             headers = jwt.get_unverified_header(self.token)
-            return JwtData(iss=result["iss"], client_id=result["appid"], x5t=headers["x5t"], kid=headers["kid"])
+            return JwtData(iss=result["iss"], client_id=result["appid"], x5t=headers["x5t"], kid=headers["kid"],
+                           exp=result["exp"])
         except Exception as e:
             logging.error("An error occurred: ", e)
             return None
@@ -66,6 +70,13 @@ def check_issuer(decoded_jwt_data):
     if tenant_id != TENANT_ID:
         return False
     return True
+
+
+def is_expired(decoded_jwt_data):
+    current_time = int(time.time())
+    if current_time > decoded_jwt_data.exp:
+        return True
+    return False
 
 
 def check_client_id(decoded_jwt_data):
@@ -80,9 +91,9 @@ def check_signature(decoded_jwt_data):
         open_id_configuration = requests.get(open_id_url)
         logging.debug(open_id_configuration.json())
         jwks_uri = open_id_configuration.json()["jwks_uri"]
-        logging.debug("JWKS URI: ", jwks_uri)
+        logging.debug("JWKS URI: %s", jwks_uri)
         keys = requests.get(jwks_uri).json()["keys"]
-        logging.debug("Keys: ", keys)
+        logging.debug("Keys: %s", keys)
         for key in keys:
             if key["kid"] == decoded_jwt_data.kid and key["x5t"] == decoded_jwt_data.x5t:
                 return True
@@ -112,27 +123,28 @@ def add_padding(encoded_str):
 
 if __name__ == '__main__':
     header_token = sys.argv[1] + " " + sys.argv[2]
-    logging.debug("Header token: ", header_token)
+    logging.info("Header token: %s", header_token)
     token = extract_token_from_header(header_token)
-    if token is not None:
-        logging.error("Token is invalid")
-        exit(1)
     if token is None:
         logging.error("Token is invalid")
         exit(1)
-    logging.debug("Token: ", token)
+    logging.debug("Token: %s", token)
     decoded_jwt = DecodedJwt(add_padding(token))
     decoded = decoded_jwt.decode()
-    logging.debug("ISS: ", decoded.iss)
-    logging.debug("Client ID: ", decoded.client_id)
-    logging.debug("X5T: ", decoded.x5t)
-    logging.debug("KID: ", decoded.kid)
+    logging.debug("ISS: %s", decoded.iss)
+    logging.debug("Client ID: %s", decoded.client_id)
+    logging.debug("X5T: %s", decoded.x5t)
+    logging.debug("KID: %s", decoded.kid)
+    logging.debug("EXP: %s", decoded.exp)
+    if is_expired(decoded):
+        logging.error("JWT is expired")
+        exit(1)
     is_valid_issuer = check_issuer(decoded)
     is_valid_client_id = check_client_id(decoded)
     is_valid_signature = check_signature(decoded)
-    logging.debug("Is valid issuer: ", is_valid_issuer)
-    logging.debug("Is valid client id: ", is_valid_client_id)
-    logging.debug("Is valid signature: ", is_valid_signature)
+    logging.debug("Is valid issuer: %s", is_valid_issuer)
+    logging.debug("Is valid client id: %s", is_valid_client_id)
+    logging.debug("Is valid signature: %s", is_valid_signature)
     if is_valid_issuer and is_valid_client_id and is_valid_signature:
         logging.info("JWT is valid")
     else:

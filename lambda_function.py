@@ -2,6 +2,7 @@ import jwt
 import requests
 import os
 import logging
+import time
 
 logger = logging.getLogger()
 logger.setLevel("DEBUG")
@@ -16,11 +17,13 @@ if CLIENT_IDS is None:
 
 
 class JwtData:
-    def __init__(self, iss, client_id, x5t, kid):
+    def __init__(self, iss, client_id, x5t, kid, exp, principal_name):
         self.iss = iss
         self.client_id = client_id
         self.x5t = x5t
         self.kid = kid
+        self.exp = exp
+        self.principal_name = principal_name
 
 
 class DecodedJwt:
@@ -31,10 +34,23 @@ class DecodedJwt:
         try:
             result = jwt.decode(self.token, options={"verify_signature": False})
             headers = jwt.get_unverified_header(self.token)
-            return JwtData(iss=result["iss"], client_id=result["appid"], x5t=headers["x5t"], kid=headers["kid"])
+            return JwtData(
+                iss=result["iss"],
+                client_id=result["appid"],
+                x5t=headers["x5t"],
+                kid=headers["kid"],
+                exp=result["exp"],
+                principal_name=result["name"])
         except Exception as e:
             logger.error("An error occurred during decode JWT: %s", e)
             return None
+
+
+def is_expired(decoded_jwt_data):
+    current_time = int(time.time())
+    if current_time > decoded_jwt_data.exp:
+        return True
+    return False
 
 
 def check_issuer(decoded_jwt_data):
@@ -83,13 +99,13 @@ def add_padding(encoded_str):
     return encoded_str + '=' * (-len(encoded_str) % 4)
 
 
-def generate_response(is_allowed):
+def generate_response(is_allowed, principal_id="user"):
     auth = 'Deny'
     if is_allowed:
         auth = 'Allow'
 
     return {
-        "principalId": "user",
+        "principalId": principal_id,
         "policyDocument": {
             "Version": "2012-10-17",
             "Statement":
@@ -119,10 +135,16 @@ def lambda_handler(event, context):
     logger.debug("Token: " + token)
     if token is None:
         return generate_response(is_allowed)
+
     decoded_jwt = DecodedJwt(add_padding(token))
     decoded = decoded_jwt.decode()
     if decoded is None:
         return generate_response(is_allowed)
+
+    if is_expired(decoded):
+        logger.error("Token is expired")
+        return generate_response(is_allowed)
+
     is_valid_issuer = check_issuer(decoded)
     logger.debug("Is valid issuer: " + str(is_valid_issuer))
     is_valid_client_id = check_client_id(decoded)
@@ -132,5 +154,6 @@ def lambda_handler(event, context):
 
     if is_valid_issuer and is_valid_client_id and is_valid_signature:
         is_allowed = True
+        logger.info("Access granted for %s", decoded.principal_name)
 
-    return generate_response(is_allowed)
+    return generate_response(is_allowed, decoded.principal_name)
